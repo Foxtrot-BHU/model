@@ -1,0 +1,5 @@
+*.[aeiou]
+*.env
+
+env/
+ignore/
