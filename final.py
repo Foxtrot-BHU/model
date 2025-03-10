@@ -58,7 +58,7 @@ async def extractEndpoint(id: int, jd: str):
 
 
 @app.get("/analysis/{id}")
-async def fetch_analysis(id: int, pgindex: int = -1, pgsize: int = -1):
+async def fetch_analysis(id: int, pgindex: int = 0, pgsize: int = 0):
     if id in wsocks:
         return JSONResponse(
             status_code=404,
@@ -79,7 +79,7 @@ async def fetch_analysis(id: int, pgindex: int = -1, pgsize: int = -1):
     retOBJ = []
     pgstart = pgindex * pgsize
     pgend = (pgindex + 1) * pgsize
-    if pgindex == pgsize == -1:
+    if pgindex == pgsize == 0:
         pgstart = 0
         pgend = len(obj)
 
@@ -93,7 +93,7 @@ async def fetch_analysis(id: int, pgindex: int = -1, pgsize: int = -1):
         count += 1
         if count < pgstart:
             continue
-        if count > pgend:
+        if count >= pgend:
             break
 
         file_hash = item["metadata"][1]
