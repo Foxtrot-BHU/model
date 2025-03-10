@@ -24,9 +24,9 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 genai.configure(api_key=os.getenv("LEAKED_API_KEY"))
 app = FastAPI()
 rclient = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
-wsocks_processed: list[int] = []
 wsocks: list[int] = []
 wsocks_metadata: dict[int, str] = {}
+wsocks_processed: list[int] = []
 
 
 def get_file_hash(file_path: str, chunk_size: int = 4096) -> str:
@@ -58,7 +58,7 @@ async def extractEndpoint(id: int, jd: str):
 
 
 @app.get("/analysis/{id}")
-async def fetch_analysis(id: int):
+async def fetch_analysis(id: int, pgindex: int = -1, pgsize: int = -1):
     if id in wsocks:
         return JSONResponse(
             status_code=404,
@@ -69,8 +69,49 @@ async def fetch_analysis(id: int):
             status_code=404,
             content={"datail": f"the proccess with id={id} does not exist"},
         )
+    try:
+        obj = json.loads(rclient.get(f"resumes:id:{id}"))
+    except:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"The content for process id={id} does not exist"},
+        )
+    retOBJ = []
+    pgstart = pgindex * pgsize
+    pgend = (pgindex + 1) * pgsize
+    if pgindex == pgsize == -1:
+        pgstart = 0
+        pgend = len(obj)
 
-    return
+    if pgstart > len(obj):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"Invalid index"},
+        )
+    count = -1
+    for item in obj:
+        count += 1
+        if count < pgstart:
+            continue
+        if count > pgend:
+            break
+
+        file_hash = item["metadata"][1]
+        file_data = json.loads(rclient.get(f"resumes:{file_hash}"))
+        retOBJ.append(
+            {
+                "Name": file_data["Name"],
+                "Email": file_data["Email"],
+                "Phone": file_data["Phone"],
+                "Skills": file_data["Skills"],
+                "Years of Experience": file_data["Years of Experience"],
+                "Projects": file_data["Projects"],
+                "File": file_data["File"],
+                "Score": item["score"],
+            }
+        )
+
+    return retOBJ
 
 
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -107,12 +148,14 @@ async def websocket_rank(websocket: WebSocket, id: int):
         {"status": "Connected", "message": "Munching on PDF Data"}
     )
 
+    file_in_order = []
     cached_responses = []
     files_to_process = []
     for file in files:
         file_hash = get_file_hash(file)
         cached_data = rclient.get(f"resumes:{file_hash}")
         if cached_data:
+            file_in_order.append([file, file_hash])
             cached_responses.append(json.loads(cached_data))
         else:
             files_to_process.append(file)
@@ -152,6 +195,7 @@ async def websocket_rank(websocket: WebSocket, id: int):
     for file, response in zip(files_to_process, new_responses):
         file_hash = get_file_hash(file)
         response["File"] = file
+        file_in_order.append([file, file_hash])
         _ = rclient.setex(f"resumes:{file_hash}", CACHE_TTL, json.dumps(response))
 
     responses = cached_responses + new_responses
@@ -188,7 +232,7 @@ async def websocket_rank(websocket: WebSocket, id: int):
     print("Computing similarity scores...", flush=True)
     try:
         top_k_results, similarity_scores = weighted_similarity(
-            resume_vectors, job_vector, candidate_names, k=5
+            resume_vectors, job_vector, file_in_order
         )
     except Exception as e:
         await websocket.send_json({"status": "Error", "message": str(e)})
@@ -206,6 +250,7 @@ async def websocket_rank(websocket: WebSocket, id: int):
     del wsocks_metadata[id]
     wsocks.remove(id)
     wsocks_processed.append(id)
+    _ = rclient.setex(f"resumes:id:{id}", CACHE_TTL, json.dumps(top_k_results))
 
 
 async def extract(pdf_path: str) -> str:
@@ -242,6 +287,8 @@ def get_prompt(description: str, isJD=False) -> str:
     Extract the following structured data from the resume:
     Dont use any markdown in response.
     - Name: str
+    - Email: list[str]
+    - Phone: list[str]
     - Job Title: list[str]
     - Skills: list[str]
     - Years of Experience: str
@@ -317,13 +364,15 @@ def convert_to_tfidf_vectors(resume_texts, job_description):
 
 
 def weighted_similarity(
-    resume_embeddings, job_embedding, candidate_names, weights=[0.3, 0.7], k=5
+    resume_embeddings, job_embedding, candidate_names, weights=[0.3, 0.7], k=-1
 ):
     """
     Compute similarity with higher weight for skills match.
     weights[0] = weight for general experience
     weights[1] = weight for skills
     """
+    if k == -1:
+        k = len(candidate_names)
     base_similarity = cosine_similarity(job_embedding, resume_embeddings)[0]
 
     # Simulate a "skills-only" embedding (vector slicing would be better)
@@ -338,7 +387,8 @@ def weighted_similarity(
 
     # Combine names and scores
     top_k_results = [
-        f"{name}: {score:.1f}%" for name, score in zip(top_k_names, top_k_scores)
+        {"metadata": name, "score": f"{score:.1f}"}
+        for name, score in zip(top_k_names, top_k_scores)
     ]
     return top_k_results, (weights[0] * base_similarity) + (
         weights[1] * skills_similarity
