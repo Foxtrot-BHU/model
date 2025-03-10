@@ -1,5 +1,6 @@
 *.[aeiou]
 *.env
+*.pkl
 
 env/
 ignore/
