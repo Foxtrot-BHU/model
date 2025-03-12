@@ -3,6 +3,7 @@ import glob
 import hashlib
 import json
 import os
+import random as rnd
 
 import google.generativeai as genai
 import joblib
@@ -12,8 +13,12 @@ import redis
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from google.ai.generativelanguage_v1beta.types import content
+from pydantic import BaseModel
+from scipy.sparse import random
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -29,6 +34,24 @@ wsocks_metadata: dict[int, str] = {}
 wsocks_processed: list[int] = []
 
 
+origins = [
+    "http://localhost:3000",
+    "http://localhost:8080",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class JDRequest(BaseModel):
+    jd: str
+
+
 def get_file_hash(file_path: str, chunk_size: int = 4096) -> str:
     hasher = hashlib.sha256()
     with open(file_path, "rb") as f:
@@ -42,18 +65,19 @@ async def root():
     return HTMLResponse("<p style='padding-left: 2rem;'>listenin</p>")
 
 
-@app.get("/extract")
-async def extractEndpoint(id: int, jd: str):
+@app.post("/extract")
+async def extractEndpoint(data: JDRequest):
+    id = rnd.randint(5000, 7000)
     if id in wsocks:
         return JSONResponse(
             status_code=200,
-            content={"id": id, "JD": f"{jd}"},
+            content={"id": id, "JD": data.jd},
         )
     wsocks.append(id)
-    wsocks_metadata[id] = jd
+    wsocks_metadata[id] = data.jd
     return JSONResponse(
         status_code=200,
-        content={"id": id, "JD": f"{jd}"},
+        content={"id": id},
     )
 
 
@@ -253,6 +277,9 @@ async def websocket_rank(websocket: WebSocket, id: int):
     _ = rclient.setex(f"resumes:id:{id}", CACHE_TTL, json.dumps(top_k_results))
 
 
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+
 async def extract(pdf_path: str) -> str:
     try:
         return await asyncio.to_thread(sync_extract, pdf_path)
@@ -289,8 +316,8 @@ def get_prompt(description: str, isJD=False) -> str:
     - Name: str
     - Email: list[str]
     - Phone: list[str]
-    - Job Title: list[str]
-    - Skills: list[str]
+    - Job Title: list[str] (Remark: Most significant max 5)
+    - Skills: list[str] (Remark: Most significant max 5)
     - Years of Experience: str
     - Projects: list[str]
     - Previous Companies: list[str]
