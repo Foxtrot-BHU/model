@@ -6,7 +6,6 @@ import os
 import random as rnd
 
 import google.generativeai as genai
-import joblib
 import numpy as np
 import pdfplumber
 import redis
