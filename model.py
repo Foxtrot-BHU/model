@@ -16,9 +16,7 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from google.ai.generativelanguage_v1beta.types import content
 from pydantic import BaseModel
-from scipy.sparse import random
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -28,7 +26,9 @@ CACHE_TTL = 86400
 model = genai.GenerativeModel("gemini-1.5-flash")
 genai.configure(api_key=os.getenv("LEAKED_API_KEY"))
 app = FastAPI()
-rclient = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+rclient: redis.Redis = redis.Redis(
+    host="localhost", port=6379, db=0, decode_responses=True
+)
 wsocks: list[int] = []
 wsocks_metadata: dict[int, str] = {}
 wsocks_processed: list[int] = []
@@ -185,7 +185,6 @@ async def websocket_rank(websocket: WebSocket, id: int):
             files_to_process.append(file)
 
     if not files_to_process:
-        print("✅ All files retrieved from cache!")
         await websocket.send_json(
             {
                 "status": "Completed",
@@ -205,7 +204,6 @@ async def websocket_rank(websocket: WebSocket, id: int):
     await websocket.send_json(
         {"status": "Connected", "message": "Making Sense of Data"}
     )
-    print("Gathering...", flush=True)
 
     try:
         new_responses = await asyncio.gather(
@@ -223,7 +221,6 @@ async def websocket_rank(websocket: WebSocket, id: int):
         _ = rclient.setex(f"resumes:{file_hash}", CACHE_TTL, json.dumps(response))
 
     responses = cached_responses + new_responses
-    print(responses)
 
     await websocket.send_json(
         {"status": "Connected", "message": "Organizing Collected Data"}
@@ -235,11 +232,8 @@ async def websocket_rank(websocket: WebSocket, id: int):
         await websocket.send_json({"status": "Error", "message": str(e)})
         await websocket.close()
         return
-    print(parsed_res)
-    print(parsed_job)
 
     await websocket.send_json({"status": "Connected", "message": "Creating Vectors"})
-    print("Vectorizing resumes and job description...", flush=True)
     try:
         resume_vectors, job_vector, vectorizer = convert_to_tfidf_vectors(
             parsed_res, parsed_job[0]
@@ -253,7 +247,6 @@ async def websocket_rank(websocket: WebSocket, id: int):
         {"status": "Connected", "message": "Computing Similarity"}
     )
     candidate_names = [response["Name"] for response in responses]
-    print("Computing similarity scores...", flush=True)
     try:
         top_k_results, similarity_scores = weighted_similarity(
             resume_vectors, job_vector, file_in_order
@@ -264,9 +257,8 @@ async def websocket_rank(websocket: WebSocket, id: int):
         return
 
     await websocket.send_json(
-        {"status": "Connected", "message": "Hold on tight... Fetching Analysis Just4u"}
+        {"status": "Connected", "message": "Hold on tight... Fetching Analysis just4u"}
     )
-    display_results(top_k_results, similarity_scores, resume_vectors)
 
     await websocket.send_json({"status": "Complete", "message": None})
     await websocket.close()
@@ -284,7 +276,6 @@ async def extract(pdf_path: str) -> str:
     try:
         return await asyncio.to_thread(sync_extract, pdf_path)
     except Exception as e:
-        print(f"Error extracting text from {pdf_path}: {e}")
         return ""
 
 
@@ -330,68 +321,57 @@ def get_prompt(description: str, isJD=False) -> str:
 
 async def get_response(prompt: str):
     response = await model.generate_content_async(prompt)
-    print(response.text, flush=True)
     try:
         parsed_response = json.loads(response.text)
     except json.decoder.JsonDecodeError as e:
         parsed_response = None
-        print(f"Error parsing JSON: {e}")
     return parsed_response
 
 
-def json2text(responses, isJD=False) -> list[str]:
-    extracted_texts = []
+def json2text(responses, isJD: bool = False) -> list[str]:
+    extracted_texts: list[str] = []
     if isJD:
         text_parts = [
             f"{responses.get('Years of Experience', '') or "experienced"} years of experience in",
             f"{', '.join(responses.get('Skills', []) or  [])}",
-            # f"Projects: {', '.join(responses.get('Projects', []) or [])}",
-            # f"Previous companies: {' '.join(responses.get('Previous Companies') or [])}",
         ]
-        extracted_texts.append(
-            " ".join(filter(None, text_parts))
-        )  # Join non-empty fields
+        extracted_texts.append(" ".join(filter(None, text_parts)))
         return extracted_texts
 
     for response in responses:
-        text_parts = [
+        text_parts: list[str] = [
             response.get("Name", ""),
             f"{response.get('Job Title', '') or ""},",
             f"{response.get('Years of Experience', '') or "experienced"} years of experience in",
             f"{', '.join(response.get('Skills', []))}",
-            # f"Projects: {' '.join(response.get('Projects', []))}",
-            # f"Previous companies: {' '.join(response.get('Previous Companies') or [])}",
         ]
-        extracted_texts.append(
-            " ".join(filter(None, text_parts))
-        )  # Join non-empty fields
+        extracted_texts.append(" ".join(filter(None, text_parts)))
     return extracted_texts
 
 
 # Vectorization and Similarity Functions
-def convert_to_tfidf_vectors(resume_texts, job_description):
+def convert_to_tfidf_vectors(resume_texts: list[str], job_description: str):
     """Converts resume texts and job description to TF-IDF vectors."""
     # Initialize TF-IDF Vectorizer
     vectorizer = TfidfVectorizer(max_features=1000, stop_words="english")
 
     # Combine resumes and job description for consistent vocabulary
-    all_texts = resume_texts + [job_description]
+    all_texts: list[str] = resume_texts + [job_description]
     tfidf_matrix = vectorizer.fit_transform(all_texts)
 
     # Split into resume vectors and job vector
     resume_vectors = tfidf_matrix[:-1]  # All but last row
     job_vector = tfidf_matrix[-1]  # Last row
 
-    # Cache (optional)
-    joblib.dump(resume_vectors, "resume_vectors.pkl")
-    joblib.dump(job_vector, "job_vector.pkl")
-    joblib.dump(vectorizer, "vectorizer.pkl")
-
     return resume_vectors, job_vector, vectorizer
 
 
 def weighted_similarity(
-    resume_embeddings, job_embedding, candidate_names, weights=[0.3, 0.7], k=-1
+    resume_embeddings,
+    job_embedding,
+    candidate_names: list[str],
+    weights: list[float] = [0.3, 0.7],
+    k: int = -1,
 ):
     """
     Compute similarity with higher weight for skills match.
@@ -420,36 +400,6 @@ def weighted_similarity(
     return top_k_results, (weights[0] * base_similarity) + (
         weights[1] * skills_similarity
     )
-
-
-def compute_cosine_similarity(resume_vectors, job_vector, candidate_names, k=5):
-    """Computes cosine similarity and returns top K matching resumes."""
-    # Cosine similarity between job vector and all resume vectors
-    similarity_scores = cosine_similarity(job_vector, resume_vectors)[0]
-    similarity_scores *= 1.5  # Boost skills component artificially
-
-    # Get top K indices using argpartition
-    top_k_indices = np.argpartition(similarity_scores, -k)[-k:]
-    # Sort by similarity in descending order
-    top_k_indices = top_k_indices[np.argsort(-similarity_scores[top_k_indices])]
-    top_k_scores = similarity_scores[top_k_indices] * 100  # Convert to percentage
-    top_k_names = [candidate_names[i] for i in top_k_indices]
-
-    # Combine names and scores
-    top_k_results = [
-        f"{name}: {score:.1f}%" for name, score in zip(top_k_names, top_k_scores)
-    ]
-
-    return top_k_results, similarity_scores
-
-
-def display_results(top_k_results, similarity_scores, resume_vectors):
-    """Displays the matching results."""
-    print("\nTop 5 Matching Resumes:")
-    for result in top_k_results:
-        print(result)
-    print(f"\nAverage Similarity Score: {np.mean(similarity_scores) * 100:.1f}%")
-    print(f"TF-IDF Matrix Shape: {resume_vectors.shape}")
 
 
 if __name__ == "__main__":
